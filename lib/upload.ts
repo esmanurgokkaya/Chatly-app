@@ -1,41 +1,59 @@
-export async function createMessageFormData(file: File | null, text: string | null): Promise<FormData | null> {
-  // Yeni bir FormData oluştur
-  const fd = new FormData()
-  
-  // Önce dosyayı ekle (varsa)
-  if (file && file instanceof File && file.size > 0) {
-    try {
-      // Dosyayı "image" adıyla ekle (backend'in beklediği parametre adı)
-      fd.append("image", file)
-      
-      console.debug("Dosya ekleniyor:", {
-        ad: file.name,
-        boyut: file.size,
-        tip: file.type
-      })
-    } catch (e) {
-      console.error("Dosya eklenirken hata:", e)
-      return null
-    }
-  }
-
-  // Sonra mesaj metnini ekle (varsa)
-  if (text?.trim()) {
-    fd.append("text", text.trim())  // "text" olarak değiştirildi
-  }
-
-  // Son bir kontrol yap
+export async function createMessageFormData(file: File | null, textMessage: string | null): Promise<{ text?: string; image?: string } | null> {
   try {
-    const kontrol = Array.from(fd.entries())
-    console.debug("FormData içeriği:", kontrol.map(([k, v]) => {
-      if (v instanceof File) return `${k}: dosya (${v.name})`
-      return `${k}: ${v}`
-    }))
+    // Dosya kontrolü
+    if (file && file instanceof File && file.size > 0) {
+      // Dosya tipini kontrol et
+      const fileType = file.type.toLowerCase()
+      const allowedTypes = ['image/jpeg', 'image/png', 'image/gif', 'image/webp']
+      
+      if (!allowedTypes.includes(fileType)) {
+        console.error("Desteklenmeyen dosya formatı:", fileType)
+        throw new Error("Desteklenmeyen dosya formatı")
+      }
+
+      // Dosya boyutunu kontrol et (5MB - backend limitine uygun)
+      const maxSize = 5 * 1024 * 1024
+      if (file.size > maxSize) {
+        console.error("Dosya çok büyük:", file.size)
+        throw new Error("Dosya boyutu 5MB'dan büyük olamaz")
+      }
+
+      // Dosyayı base64'e çevir
+      return new Promise((resolve, reject) => {
+        const reader = new FileReader()
+        reader.onloadend = () => {
+          const base64Data = reader.result as string
+          // Data URI prefix'ini kaldır (backend'in beklediği format)
+          const base64Content = base64Data.split(',')[1]
+          
+          console.debug("Base64 içeriği hazırlandı:", {
+            textLength: textMessage?.length ?? 0,
+            base64Length: base64Content.length
+          })
+          
+          resolve({
+            text: textMessage?.trim() || undefined,
+            image: base64Content
+          })
+        }
+        reader.onerror = () => {
+          console.error("Dosya okuma hatası:", reader.error)
+          reject(new Error("Dosya okunamadı"))
+        }
+        reader.readAsDataURL(file)
+      })
+    }
+
+    // Sadece metin varsa
+    if (textMessage?.trim()) {
+      return { text: textMessage.trim() }
+    }
+
+    return null
   } catch (e) {
-    console.error("FormData kontrol hatası:", e)
+    console.error("Mesaj hazırlama hatası:", e)
+    return null
   }
-  
-  return fd
 }
 
 export function clearFileStates(

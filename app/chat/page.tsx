@@ -214,21 +214,23 @@ export default function ChatPage() {
       let resp
       
       if (currentFile) {
-        // Create form data with file and message
-        const fd = await createMessageFormData(currentFile, message.trim())
-        if (!fd) {
+        // Dosyayı base64'e çevir ve mesajla birlikte gönder
+        const messageData = await createMessageFormData(currentFile, message.trim())
+        if (!messageData) {
           setErrorMessage("Dosya işlenirken hata oluştu")
-          // remove optimistic message
+          // Optimistik mesajı kaldır
           setMessages((prev) => prev.filter((m) => m.id !== tempId))
           return
         }
         
-        // Clear the states before sending
+        // Durumları temizle
         clearFileStates(fileInputRef.current, setSelectedFile, setPreviewUrl)
         
-        resp = await sendMessageToId(String(selectedContact.id), fd)
+        // Mesajı gönder
+        resp = await sendMessageToId(String(selectedContact.id), messageData)
       } else {
-        resp = await sendMessageToId(String(selectedContact.id), optimMsg.text)
+        // Sadece metin gönder
+        resp = await sendMessageToId(String(selectedContact.id), { text: optimMsg.text })
       }
 
       if (resp.ok && resp.message) {
@@ -293,55 +295,71 @@ export default function ChatPage() {
   }
 
   const handleImageUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
-    // Önce hata mesajını temizle
-    setErrorMessage(null)
-    
-    // Önceki dosya durumlarını temizle
-    clearFileStates(fileInputRef.current, setSelectedFile, setPreviewUrl)
-    
-    const file = e.target.files?.[0]
-    if (!file) return
-    
-    // Temel doğrulama
-    if (!(file instanceof File)) {
-      setErrorMessage("Geçersiz dosya seçildi")
-      return
-    }
-    
-    // Dosya boyutu kontrolü (örn. max 10MB)
-    const maxSize = 10 * 1024 * 1024 // 10MB
-    if (file.size === 0 || file.size > maxSize) {
-      setErrorMessage(`Dosya boyutu 0 veya ${maxSize / (1024 * 1024)}MB'dan büyük olamaz`)
-      return
-    }
-    
-    // Dosya tipi kontrolü
-    if (!file.type.startsWith('image/')) {
-      setErrorMessage("Lütfen bir resim dosyası seçin")
-      return
-    }
-    
-    // İzin verilen formatlar
-    const allowedTypes = ['image/jpeg', 'image/png', 'image/gif', 'image/webp']
-    if (!allowedTypes.includes(file.type)) {
-      setErrorMessage("Sadece JPEG, PNG, GIF veya WEBP formatları desteklenir")
-      return
-    }
-    
-    // Yeni dosyayı ayarla
-    setSelectedFile(file)
-    
-    // Önizleme oluştur
-    const reader = new FileReader()
-    reader.onloadend = () => {
-      setPreviewUrl(reader.result as string)
-    }
-    reader.onerror = () => {
-      console.error('Önizleme oluşturma hatası:', reader.error)
-      setErrorMessage("Resim önizleme oluşturulamadı")
+    try {
+      console.log('Dosya yükleme başladı', {
+        files: e.target.files,
+        fileCount: e.target.files?.length,
+        inputValue: e.target.value
+      });
+      
+      // Önce hata mesajını temizle
+      setErrorMessage(null)
+      
+      const file = e.target.files?.[0]
+      console.log('Seçilen dosya:', {
+        name: file?.name,
+        type: file?.type,
+        size: file?.size
+      });
+      
+      if (!file) {
+        console.log('Dosya seçilmedi veya seçim iptal edildi');
+        return
+      }
+      
+      // Önceki dosya durumlarını temizle
+      clearFileStates(fileInputRef.current, setSelectedFile, setPreviewUrl)
+      
+      // Temel doğrulama
+      if (!(file instanceof File)) {
+        throw new Error("Geçersiz dosya seçildi")
+      }
+      
+      // Dosya boyutu kontrolü (örn. max 10MB)
+      const maxSize = 10 * 1024 * 1024 // 10MB
+      if (file.size === 0 || file.size > maxSize) {
+        throw new Error(`Dosya boyutu 0 veya ${maxSize / (1024 * 1024)}MB'dan büyük olamaz`)
+      }
+      
+      // Dosya tipi kontrolü
+      if (!file.type.startsWith('image/')) {
+        throw new Error("Lütfen bir resim dosyası seçin")
+      }
+      
+      // İzin verilen formatlar
+      const allowedTypes = ['image/jpeg', 'image/png', 'image/gif', 'image/webp']
+      if (!allowedTypes.includes(file.type)) {
+        throw new Error("Sadece JPEG, PNG, GIF veya WEBP formatları desteklenir")
+      }
+      
+      // Yeni dosyayı ayarla
+      setSelectedFile(file)
+      
+      // Önizleme oluştur
+      const reader = new FileReader()
+      reader.onloadend = () => {
+        setPreviewUrl(reader.result as string)
+      }
+      reader.onerror = () => {
+        console.error('Önizleme oluşturma hatası:', reader.error)
+        throw new Error("Resim önizleme oluşturulamadı")
+      }
+      reader.readAsDataURL(file)
+    } catch (error) {
+      console.error('Dosya yükleme hatası:', error)
+      setErrorMessage(error instanceof Error ? error.message : "Dosya yüklenirken bir hata oluştu")
       clearFileStates(fileInputRef.current, setSelectedFile, setPreviewUrl)
     }
-    reader.readAsDataURL(file)
   }
 
   const getInitials = (name: string) => {
@@ -611,14 +629,25 @@ export default function ChatPage() {
                 <input
                   type="file"
                   ref={fileInputRef}
-                  onChange={handleImageUpload}
-                  accept="image/*"
+                  onChange={(e) => {
+                    console.log('onChange tetiklendi', e.target.files);
+                    handleImageUpload(e);
+                  }}
+                  accept="image/jpeg,image/png,image/gif,image/webp"
                   className="hidden"
                 />
                 <Button
                   variant="ghost"
                   size="icon"
-                  onClick={() => fileInputRef.current?.click()}
+                  onClick={(e) => {
+                    e.preventDefault();
+                    console.log('Resim seçme butonu tıklandı');
+                    // Önce input'u sıfırla
+                    if (fileInputRef.current) {
+                      fileInputRef.current.value = '';
+                      fileInputRef.current.click();
+                    }
+                  }}
                   className="text-muted-foreground hover:text-primary"
                 >
                   <ImageIcon className="h-5 w-5" />
