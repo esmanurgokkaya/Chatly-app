@@ -56,21 +56,20 @@ export async function getMessagesByUserId(id: string): Promise<{ ok: boolean; me
   }
 }
 
-export async function sendMessageToId(id: string, body: string | FormData | Record<string, any>): Promise<{ ok: boolean; message?: any; error?: string; status?: number }> {
-  // If caller provides FormData (file + optional text), send it directly as multipart/form-data
+export async function sendMessageToId(id: string, body: string | { text?: string; image?: string } | Record<string, any>): Promise<{ ok: boolean; message?: any; error?: string; status?: number }> {
   const url = `${CHAT_API}/send/${encodeURIComponent(id)}`
   try {
     let res: Response
-    if (body instanceof FormData) {
-      console.debug('Sending as FormData:', {
-        hasText: !!body.get('text'),
-        hasFile: !!body.get('file')
+    if (typeof body === 'object' && (body.text || body.image)) {
+      console.debug('Sending as JSON:', {
+        hasText: !!body.text,
+        hasImage: !!body.image
       })
       
       res = await fetch(url, {
         method: "POST",
-        // FormData için Content-Type header'ı göndermiyoruz, browser otomatik ekleyecek
-        body: body,
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
         credentials: "include"
       })
     } else if (typeof body === 'string') {
