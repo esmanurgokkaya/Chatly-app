@@ -5,6 +5,7 @@ import type React from "react"
 import { useState, useEffect, useRef } from "react"
 import { useRouter } from "next/navigation"
 import { Avatar, AvatarFallback } from "@/components/ui/avatar"
+import { useSocket } from "@/context/socket-context"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { ScrollArea } from "@/components/ui/scroll-area"
@@ -46,6 +47,7 @@ export default function ChatPage() {
   const [contacts, setContacts] = useState<Contact[]>(emptyContacts)
   const [chats, setChats] = useState<Contact[]>([])
   const [selectedContact, setSelectedContact] = useState<Contact | null>(null)
+  const { socket, onlineUsers } = useSocket()
   const [message, setMessage] = useState("")
   const [selectedFile, setSelectedFile] = useState<File | null>(null)
   const [previewUrl, setPreviewUrl] = useState<string | null>(null)
@@ -56,6 +58,55 @@ export default function ChatPage() {
   const [messagesLoading, setMessagesLoading] = useState(false)
   const fileInputRef = useRef<HTMLInputElement>(null)
   const messagesEndRef = useRef<HTMLDivElement>(null)
+
+  useEffect(() => {
+    if (socket) {
+      // Yeni mesaj geldiğinde
+      socket.on('newMessage', async (message: any) => {
+        if (selectedContact && String(message.senderId) === String(selectedContact.id)) {
+          const apiBase = (process.env.NEXT_PUBLIC_API_BASE ?? "").replace(/\/api\/?$/i, "");
+          const normalizeImage = (img: any) => {
+            if (!img) return undefined;
+            const s = String(img);
+            if (s.startsWith("http://") || s.startsWith("https://")) return s;
+            if (s.startsWith("/")) return `${apiBase}${s}`;
+            return s;
+          };
+
+          setMessages(prev => [...prev, {
+            id: message._id || Date.now(),
+            text: message.text || message.message || "",
+            image: normalizeImage(message.image ?? message.imageUrl ?? message.fileUrl ?? message.url ?? message.file),
+            sender: "other",
+            time: new Date().toLocaleTimeString("tr-TR", { hour: "2-digit", minute: "2-digit" })
+          }]);
+        }
+      });
+
+      // Kullanıcı online/offline olduğunda
+      socket.on('userStatus', ({ userId, status }: { userId: string, status: boolean }) => {
+        // Seçili kontağı güncelle
+        if (selectedContact && String(selectedContact.id) === String(userId)) {
+          setSelectedContact(prev => prev ? {...prev, online: status} : null);
+        }
+
+        // Kontaklar listesini güncelle
+        setContacts(prev => prev.map(contact => 
+          String(contact.id) === String(userId) ? {...contact, online: status} : contact
+        ));
+
+        // Sohbetler listesini güncelle
+        setChats(prev => prev.map(chat => 
+          String(chat.id) === String(userId) ? {...chat, online: status} : chat
+        ));
+      });
+
+      return () => {
+        socket.off('newMessage');
+        socket.off('userStatus');
+      };
+    }
+  }, [socket, selectedContact]);
 
   useEffect(() => {
     ;(async () => {
@@ -491,67 +542,70 @@ export default function ChatPage() {
               <div className="text-sm text-muted-foreground p-3">Sohbet bulunamadı</div>
             )}
 
-            {(activeTab === "contacts" ? contacts : chats).map((contact) => (
-              <button
-                key={contact.id}
-                onClick={async () => {
-                  setSelectedContact(contact)
-                  setActiveTab("chat")
-                  setMessagesLoading(true)
-                  try {
-                    const resp = await getMessagesByUserId(String(contact.id))
-                    if (resp.ok && resp.messages) {
-                            const uid = currentUserId ?? (user as any)?.id ?? (user as any)?._id
-                            const apiBase = (process.env.NEXT_PUBLIC_API_BASE ?? "").replace(/\/api\/?$/i, "")
-                            const normalizeImage = (img: any) => {
-                              if (!img) return undefined
-                              const s = String(img)
-                              if (s.startsWith("http://") || s.startsWith("https://")) return s
-                              if (s.startsWith("/")) return `${apiBase}${s}`
-                              return s
-                            }
-                            setMessages(
-                              resp.messages.map((m: any, idx: number) => ({
-                                id: idx + 1,
-                                text: m.text || m.message || "",
-                                image: normalizeImage(m.image ?? m.imageUrl ?? m.fileUrl ?? m.url ?? m.file),
-                                sender: uid && (m.senderId?.toString ? m.senderId.toString() : m.senderId) === (uid?.toString ? uid.toString() : uid) ? "me" : "other",
-                                time: m.createdAt
-                                  ? new Date(m.createdAt).toLocaleTimeString("tr-TR", { hour: "2-digit", minute: "2-digit" })
-                                  : new Date().toLocaleTimeString("tr-TR", { hour: "2-digit", minute: "2-digit" }),
-                              })),
-                            )
-                    } else {
-                      setMessages([])
+            {(activeTab === "contacts" ? contacts : chats).map((contact) => {
+              const isOnline = onlineUsers.includes(String(contact.id));
+              return (
+                <button
+                  key={contact.id}
+                  onClick={async () => {
+                    setSelectedContact({...contact, online: isOnline});
+                    setActiveTab("chat");
+                    setMessagesLoading(true);
+                    try {
+                      const resp = await getMessagesByUserId(String(contact.id));
+                      if (resp.ok && resp.messages) {
+                        const uid = currentUserId ?? (user as any)?.id ?? (user as any)?._id;
+                        const apiBase = (process.env.NEXT_PUBLIC_API_BASE ?? "").replace(/\/api\/?$/i, "");
+                        const normalizeImage = (img: any) => {
+                          if (!img) return undefined;
+                          const s = String(img);
+                          if (s.startsWith("http://") || s.startsWith("https://")) return s;
+                          if (s.startsWith("/")) return `${apiBase}${s}`;
+                          return s;
+                        };
+                        setMessages(
+                          resp.messages.map((m: any, idx: number) => ({
+                            id: idx + 1,
+                            text: m.text || m.message || "",
+                            image: normalizeImage(m.image ?? m.imageUrl ?? m.fileUrl ?? m.url ?? m.file),
+                            sender: uid && (m.senderId?.toString ? m.senderId.toString() : m.senderId) === (uid?.toString ? uid.toString() : uid) ? "me" : "other",
+                            time: m.createdAt
+                              ? new Date(m.createdAt).toLocaleTimeString("tr-TR", { hour: "2-digit", minute: "2-digit" })
+                              : new Date().toLocaleTimeString("tr-TR", { hour: "2-digit", minute: "2-digit" }),
+                          }))
+                        );
+                      } else {
+                        setMessages([]);
+                      }
+                    } catch (err) {
+                      console.error(err);
+                      setErrorMessage("Mesajlar yüklenirken hata oluştu");
+                    } finally {
+                      setMessagesLoading(false);
                     }
-                  } catch (err) {
-                    console.error(err)
-                    setErrorMessage("Mesajlar yüklenirken hata oluştu")
-                  } finally {
-                    setMessagesLoading(false)
-                  }
-                }}
-                className={cn(
-                  "w-full p-3 rounded-lg flex items-center gap-3 hover:bg-accent/50 transition-colors mb-1",
-                  selectedContact?.id === contact.id && "bg-accent",
-                )}
-              >
-                <div className="relative">
-                  <Avatar className="h-11 w-11">
-                    <AvatarFallback className="bg-gradient-to-br from-primary to-accent text-primary-foreground">
-                      {getInitials(contact.name)}
-                    </AvatarFallback>
-                  </Avatar>
-                  {contact.online && (
-                    <span className="absolute bottom-0 right-0 h-3 w-3 bg-green-500 rounded-full ring-2 ring-card" />
+                  }}
+                  className={cn(
+                    "w-full p-3 rounded-lg flex items-center gap-3 hover:bg-accent/50 transition-colors mb-1",
+                    selectedContact?.id === contact.id && "bg-accent"
                   )}
-                </div>
-                <div className="flex-1 text-left">
-                  <h3 className="font-medium text-sm text-foreground">{contact.name}</h3>
-                  <p className="text-xs text-muted-foreground truncate">{contact.lastMessage}</p>
-                </div>
-              </button>
-            ))}
+                >
+                  <div className="relative">
+                    <Avatar className="h-11 w-11">
+                      <AvatarFallback className="bg-gradient-to-br from-primary to-accent text-primary-foreground">
+                        {getInitials(contact.name)}
+                      </AvatarFallback>
+                    </Avatar>
+                    {isOnline && (
+                      <span className="absolute bottom-0 right-0 h-3 w-3 bg-green-500 rounded-full ring-2 ring-card" />
+                    )}
+                  </div>
+                  <div className="flex-1 text-left">
+                    <h3 className="font-medium text-sm text-foreground">{contact.name}</h3>
+                    <p className="text-xs text-muted-foreground truncate">{contact.lastMessage}</p>
+                  </div>
+                </button>
+              );
+            })}
           </div>
         </ScrollArea>
       </div>
