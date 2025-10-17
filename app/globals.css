@@ -4,6 +4,11 @@
 @custom-variant dark (&:is(.dark *));
 
 :root {
+  --online: #22C55E;
+  --message-sent: #7C3AED;
+  --message-received: #ffffff;
+  --message-sent-shadow: rgba(124, 58, 237, 0.1);
+  --message-received-shadow: rgba(0, 0, 0, 0.05);
   --background: oklch(0.99 0.005 280);
   --foreground: oklch(0.25 0.02 280);
   --card: oklch(1 0 0);
@@ -40,6 +45,11 @@
 }
 
 .dark {
+  --online: #22C55E;
+  --message-sent: #7C3AED;
+  --message-received: #1e1e1e;
+  --message-sent-shadow: rgba(124, 58, 237, 0.2);
+  --message-received-shadow: rgba(0, 0, 0, 0.1);
   --background: oklch(0.15 0.01 280);
   --foreground: oklch(0.98 0.005 280);
   --card: oklch(0.18 0.01 280);
