@@ -1,8 +1,6 @@
 export async function createMessageFormData(file: File | null, textMessage: string | null): Promise<{ text?: string; image?: string } | null> {
   try {
-    // Dosya kontrolü
     if (file && file instanceof File && file.size > 0) {
-      // Dosya tipini kontrol et
       const fileType = file.type.toLowerCase()
       const allowedTypes = ['image/jpeg', 'image/png', 'image/gif', 'image/webp']
       
@@ -11,19 +9,16 @@ export async function createMessageFormData(file: File | null, textMessage: stri
         throw new Error("Desteklenmeyen dosya formatı")
       }
 
-      // Dosya boyutunu kontrol et (5MB - backend limitine uygun)
       const maxSize = 5 * 1024 * 1024
       if (file.size > maxSize) {
         console.error("Dosya çok büyük:", file.size)
         throw new Error("Dosya boyutu 5MB'dan büyük olamaz")
       }
 
-      // Dosyayı base64'e çevir
       return new Promise((resolve, reject) => {
         const reader = new FileReader()
         reader.onloadend = () => {
           const base64Data = reader.result as string
-          // Data URI prefix'ini kaldır (backend'in beklediği format)
           const base64Content = base64Data.split(',')[1]
           
           console.debug("Base64 içeriği hazırlandı:", {
@@ -44,7 +39,6 @@ export async function createMessageFormData(file: File | null, textMessage: stri
       })
     }
 
-    // Sadece metin varsa
     if (textMessage?.trim()) {
       return { text: textMessage.trim() }
     }
