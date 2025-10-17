@@ -27,6 +27,7 @@ type Contact = {
   avatar: string
   lastMessage: string
   online: boolean
+  isWriting?: boolean
 }
 
 type Message = {
@@ -35,6 +36,7 @@ type Message = {
   sender: "me" | "other"
   time: string
   image?: string
+  status?: 'sent' | 'delivered' | 'read'
 }
 
 const emptyContacts: Contact[] = []
@@ -47,7 +49,7 @@ export default function ChatPage() {
   const [contacts, setContacts] = useState<Contact[]>(emptyContacts)
   const [chats, setChats] = useState<Contact[]>([])
   const [selectedContact, setSelectedContact] = useState<Contact | null>(null)
-  const { socket, onlineUsers } = useSocket()
+  const { socket, onlineUsers, typingUsers, sendTypingStatus } = useSocket()
   const [message, setMessage] = useState("")
   const [selectedFile, setSelectedFile] = useState<File | null>(null)
   const [previewUrl, setPreviewUrl] = useState<string | null>(null)
@@ -58,11 +60,34 @@ export default function ChatPage() {
   const [messagesLoading, setMessagesLoading] = useState(false)
   const fileInputRef = useRef<HTMLInputElement>(null)
   const messagesEndRef = useRef<HTMLDivElement>(null)
+  const typingTimeoutRef = useRef<NodeJS.Timeout | null>(null)
+  const [isTyping, setIsTyping] = useState(false)
 
   useEffect(() => {
     if (socket) {
-      // Yeni mesaj geldiğinde
+      socket.on('userTyping', ({ userId, isTyping }: { userId: string, isTyping: boolean }) => {
+        setChats(prevChats => prevChats.map(chat => {
+          if (String(chat.id) === String(userId)) {
+            return { ...chat, isWriting: isTyping };
+          }
+          return chat;
+        }));
+      });
+
       socket.on('newMessage', async (message: any) => {
+        console.log('Received new message:', message);
+        
+        setChats(prevChats => prevChats.map(chat => {
+          if (String(chat.id) === String(message.senderId)) {
+            return {
+              ...chat,
+              lastMessage: message.text || message.message || "",
+              isWriting: false 
+            };
+          }
+          return chat;
+        }));
+
         if (selectedContact && String(message.senderId) === String(selectedContact.id)) {
           const apiBase = (process.env.NEXT_PUBLIC_API_BASE ?? "").replace(/\/api\/?$/i, "");
           const normalizeImage = (img: any) => {
@@ -73,44 +98,82 @@ export default function ChatPage() {
             return s;
           };
 
-          setMessages(prev => [...prev, {
-            id: message._id || Date.now(),
-            text: message.text || message.message || "",
-            image: normalizeImage(message.image ?? message.imageUrl ?? message.fileUrl ?? message.url ?? message.file),
-            sender: "other",
-            time: new Date().toLocaleTimeString("tr-TR", { hour: "2-digit", minute: "2-digit" })
-          }]);
+          const messageExists = messages.some(m => 
+            m.id === message._id || 
+            (m.text === message.text && m.time === message.time)
+          );
+
+          if (!messageExists) {
+            setMessages(prev => [...prev, {
+              id: message._id || Date.now(),
+              text: message.text || message.message || "",
+              image: normalizeImage(message.image ?? message.imageUrl ?? message.fileUrl ?? message.url ?? message.file),
+              sender: "other",
+              time: new Date().toLocaleTimeString("tr-TR", { hour: "2-digit", minute: "2-digit" }),
+              status: 'delivered'
+            }]);
+
+            socket.emit('messageRead', { 
+              messageId: message._id, 
+              senderId: message.senderId,
+              recipientId: message.recipientId
+            });
+
+            socket.emit('messageReceived', {
+              messageId: message._id,
+              senderId: message.senderId,
+              recipientId: message.recipientId
+            });
+          }
         }
       });
 
-      // Kullanıcı online/offline olduğunda
       socket.on('userStatus', ({ userId, status }: { userId: string, status: boolean }) => {
-        // Seçili kontağı güncelle
         if (selectedContact && String(selectedContact.id) === String(userId)) {
           setSelectedContact(prev => prev ? {...prev, online: status} : null);
         }
 
-        // Kontaklar listesini güncelle
         setContacts(prev => prev.map(contact => 
           String(contact.id) === String(userId) ? {...contact, online: status} : contact
         ));
 
-        // Sohbetler listesini güncelle
         setChats(prev => prev.map(chat => 
           String(chat.id) === String(userId) ? {...chat, online: status} : chat
+        ));
+      });
+
+      socket.on('messageStatus', ({ messageId, status }: { messageId: string, status: 'delivered' | 'read' }) => {
+        setMessages(prev => prev.map(msg => 
+          msg.id.toString() === messageId ? { ...msg, status } : msg
         ));
       });
 
       return () => {
         socket.off('newMessage');
         socket.off('userStatus');
+        socket.off('messageStatus');
+        socket.off('userTyping');
+      };
+    }
+  }, [socket, selectedContact]);
+
+  useEffect(() => {
+    if (socket) {
+      socket.on('reconnect', () => {
+        console.log('Socket reconnected, rejoining chat...');
+        if (selectedContact) {
+          socket.emit('join', { recipientId: String(selectedContact.id) });
+        }
+      });
+
+      return () => {
+        socket.off('reconnect');
       };
     }
   }, [socket, selectedContact]);
 
   useEffect(() => {
     ;(async () => {
-      // load user from server (authCheck) and fallback to localStorage
       let parsedUser: any = null
       let authoritativeId: string | undefined = undefined
       try {
@@ -123,7 +186,6 @@ export default function ChatPage() {
           if (authoritativeId) setCurrentUserId(String(authoritativeId))
         }
       } catch (err) {
-        // ignore and fallback to localStorage
       }
 
       if (!parsedUser) {
@@ -136,7 +198,6 @@ export default function ChatPage() {
         setUser(parsedUser)
       }
 
-      // load contacts and, if present, messages for the first contact
       try {
         const resp = await getContacts()
         console.debug("getContacts response:", resp)
@@ -192,7 +253,6 @@ export default function ChatPage() {
         setErrorMessage("Kişiler yüklenirken hata oluştu")
       }
 
-      // load chats
       try {
         const resp = await getChats()
         console.debug("getChats response:", resp)
@@ -221,12 +281,11 @@ export default function ChatPage() {
     try {
       const result = await authLogout()
       if (!result.ok) {
-        console.debug("Logout API response:", result)  // Use debug instead of error
+        console.debug("Logout API response:", result)  
       }
     } catch (e) {
-      console.debug("Logout error:", e)  // Use debug instead of error
+      console.debug("Logout error:", e)  
     } finally {
-      // Always clear local storage and redirect
       localStorage.removeItem("user")
       router.push("/")
     }
@@ -235,14 +294,11 @@ export default function ChatPage() {
   const handleSendMessage = async () => {
     if (!selectedContact) return
     
-    // Require either text or file
     if (!(message?.trim() || selectedFile)) return
 
-    // Keep a local reference to the current file
     const currentFile = selectedFile
     const currentText = message.trim()
     
-    // Create optimistic message
     const tempId = -Date.now()
     const optimMsg: Message = {
       id: tempId,
@@ -250,39 +306,43 @@ export default function ChatPage() {
       sender: "me",
       time: new Date().toLocaleTimeString("tr-TR", { hour: "2-digit", minute: "2-digit" }),
       image: previewUrl ?? undefined,
+      status: 'sent',
     }
     
-    // Add optimistic message and clear input field
     setMessages(m => [...m, optimMsg])
     setMessage("")
     
-    // Clear file states before sending to avoid double send
     if (currentFile) {
       clearFileStates(fileInputRef.current, setSelectedFile, setPreviewUrl)
     }
     
     try {
-      let resp
+      let resp;
+      let messageData;
       
       if (currentFile) {
-        // Dosyayı base64'e çevir ve mesajla birlikte gönder
-        const messageData = await createMessageFormData(currentFile, message.trim())
+        messageData = await createMessageFormData(currentFile, message.trim())
         if (!messageData) {
           setErrorMessage("Dosya işlenirken hata oluştu")
-          // Optimistik mesajı kaldır
           setMessages((prev) => prev.filter((m) => m.id !== tempId))
           return
         }
         
-        // Durumları temizle
         clearFileStates(fileInputRef.current, setSelectedFile, setPreviewUrl)
-        
-        // Mesajı gönder
-        resp = await sendMessageToId(String(selectedContact.id), messageData)
       } else {
-        // Sadece metin gönder
-        resp = await sendMessageToId(String(selectedContact.id), { text: optimMsg.text })
+        messageData = { text: optimMsg.text }
       }
+
+      if (socket && socket.connected) {
+        socket.emit('sendMessage', {
+          recipientId: String(selectedContact.id),
+          senderId: currentUserId,
+          ...messageData,
+          createdAt: new Date().toISOString()
+        });
+      }
+
+      resp = await sendMessageToId(String(selectedContact.id), messageData)
 
       if (resp.ok && resp.message) {
         const serverRaw = resp.message as any
@@ -295,7 +355,6 @@ export default function ChatPage() {
           return s
         }
         
-        // ensure we have authoritative currentUserId
         let uid = currentUserId
         if (!uid) {
           const ac = await authCheck()
@@ -316,19 +375,15 @@ export default function ChatPage() {
             : new Date().toLocaleTimeString("tr-TR", { hour: "2-digit", minute: "2-digit" }),
         }
         
-        // replace optimistic message with server message
         setMessages((prev) => prev.map((m) => (m.id === tempId ? serverMsg : m)))
         
-        // Clear file states after successful send
         if (selectedFile) {
           clearFileStates(fileInputRef.current, setSelectedFile, setPreviewUrl)
         }
       } else {
-        // remove optimistic if failed
         setMessages((prev) => prev.filter((m) => m.id !== tempId))
         setErrorMessage(resp.error || "Mesaj gönderilemedi")
         
-        // Clear file states on error too
         if (selectedFile) {
           clearFileStates(fileInputRef.current, setSelectedFile, setPreviewUrl)
         }
@@ -338,7 +393,6 @@ export default function ChatPage() {
       setMessages((prev) => prev.filter((m) => m.id !== tempId))
       setErrorMessage("Mesaj gönderilirken hata oluştu")
       
-      // Clear file states on error
       if (selectedFile) {
         clearFileStates(fileInputRef.current, setSelectedFile, setPreviewUrl)
       }
@@ -353,7 +407,6 @@ export default function ChatPage() {
         inputValue: e.target.value
       });
       
-      // Önce hata mesajını temizle
       setErrorMessage(null)
       
       const file = e.target.files?.[0]
@@ -368,35 +421,28 @@ export default function ChatPage() {
         return
       }
       
-      // Önceki dosya durumlarını temizle
       clearFileStates(fileInputRef.current, setSelectedFile, setPreviewUrl)
       
-      // Temel doğrulama
       if (!(file instanceof File)) {
         throw new Error("Geçersiz dosya seçildi")
       }
       
-      // Dosya boyutu kontrolü (örn. max 10MB)
       const maxSize = 10 * 1024 * 1024 // 10MB
       if (file.size === 0 || file.size > maxSize) {
         throw new Error(`Dosya boyutu 0 veya ${maxSize / (1024 * 1024)}MB'dan büyük olamaz`)
       }
       
-      // Dosya tipi kontrolü
       if (!file.type.startsWith('image/')) {
         throw new Error("Lütfen bir resim dosyası seçin")
       }
       
-      // İzin verilen formatlar
       const allowedTypes = ['image/jpeg', 'image/png', 'image/gif', 'image/webp']
       if (!allowedTypes.includes(file.type)) {
         throw new Error("Sadece JPEG, PNG, GIF veya WEBP formatları desteklenir")
       }
       
-      // Yeni dosyayı ayarla
       setSelectedFile(file)
       
-      // Önizleme oluştur
       const reader = new FileReader()
       reader.onloadend = () => {
         setPreviewUrl(reader.result as string)
@@ -424,33 +470,33 @@ export default function ChatPage() {
   if (!user) return null
 
   return (
-    <div className="flex h-screen bg-gradient-to-br from-purple-50 via-pink-50 to-blue-50">
+    <div className="flex h-screen bg-background">
       {/* Sidebar */}
-      <div className="w-80 bg-card border-r border-border flex flex-col">
+      <div className="w-80 bg-card/50 backdrop-blur-sm border-r border-border flex flex-col">
         {/* Profile Header */}
-        <div className="p-4 border-b border-border bg-gradient-to-r from-primary/5 to-accent/5">
+        <div className="p-4 border-b border-border bg-gradient-to-r from-primary/5 via-accent/5 to-primary/5">
           <div className="flex items-center justify-between">
             <div className="flex items-center gap-3">
-              <Avatar className="h-12 w-12 ring-2 ring-primary/20">
-                <AvatarFallback className="bg-primary text-primary-foreground font-semibold">
+              <Avatar className="h-12 w-12 ring-2 ring-primary/20 shadow-lg">
+                <AvatarFallback className="bg-gradient-to-br from-primary to-accent text-primary-foreground font-semibold">
                   {getInitials(user.fullname)}
                 </AvatarFallback>
               </Avatar>
               <div>
                 <h2 className="font-semibold text-foreground">{user.fullname}</h2>
-                <p className="text-xs text-muted-foreground">{user.email}</p>
+                <p className="text-xs text-muted-foreground/80">{user.email}</p>
               </div>
             </div>
             <Button
               variant="ghost"
               size="icon"
               onClick={handleLogout}
-              className="text-muted-foreground hover:text-destructive"
+              className="text-muted-foreground hover:text-destructive transition-colors duration-200"
             >
               <LogOut className="h-5 w-5" />
             </Button>
           </div>
-          {errorMessage && <div className="text-xs text-destructive mt-2">{errorMessage}</div>}
+          {errorMessage && <div className="text-xs text-destructive mt-2 p-2 bg-destructive/10 rounded-md">{errorMessage}</div>}
         </div>
 
         {/* Tabs */}
@@ -585,23 +631,41 @@ export default function ChatPage() {
                     }
                   }}
                   className={cn(
-                    "w-full p-3 rounded-lg flex items-center gap-3 hover:bg-accent/50 transition-colors mb-1",
-                    selectedContact?.id === contact.id && "bg-accent"
+                    "w-full p-3 rounded-lg flex items-center gap-3 transition-all duration-200 mb-1",
+                    "hover:bg-accent/10 hover:scale-[0.99] active:scale-[0.97]",
+                    selectedContact?.id === contact.id ? "bg-accent/15 shadow-sm" : "bg-transparent"
                   )}
                 >
                   <div className="relative">
-                    <Avatar className="h-11 w-11">
-                      <AvatarFallback className="bg-gradient-to-br from-primary to-accent text-primary-foreground">
+                    <Avatar className="h-11 w-11 ring-2 ring-border shadow-md">
+                      <AvatarFallback className="bg-gradient-to-br from-primary to-accent text-primary-foreground font-medium">
                         {getInitials(contact.name)}
                       </AvatarFallback>
                     </Avatar>
                     {isOnline && (
-                      <span className="absolute bottom-0 right-0 h-3 w-3 bg-green-500 rounded-full ring-2 ring-card" />
+                      <span className="absolute bottom-0 right-0 h-3 w-3 bg-[var(--online)] rounded-full ring-2 ring-background animate-pulse" />
                     )}
                   </div>
                   <div className="flex-1 text-left">
                     <h3 className="font-medium text-sm text-foreground">{contact.name}</h3>
-                    <p className="text-xs text-muted-foreground truncate">{contact.lastMessage}</p>
+                    <p className={cn(
+                      "text-xs truncate",
+                      contact.isWriting 
+                        ? "text-[var(--typing)] font-medium"
+                        : "text-muted-foreground"
+                    )}>
+                      {contact.isWriting ? "Yazıyor..." : contact.lastMessage}
+                    </p>
+                  </div>
+                  <div className="flex flex-col items-end space-y-1.5">
+                    <span className="text-xs text-muted-foreground/70">
+                      {new Date().toLocaleTimeString("tr-TR", { hour: "2-digit", minute: "2-digit" })}
+                    </span>
+                    {contact.online && (
+                      <div className="px-1.5 py-0.5 bg-[var(--online)]/10 rounded-full">
+                        <span className="text-[10px] text-[var(--online)]">çevrimiçi</span>
+                      </div>
+                    )}
                   </div>
                 </button>
               );
@@ -623,7 +687,13 @@ export default function ChatPage() {
               </Avatar>
               <div>
                 <h2 className="font-semibold text-foreground">{selectedContact.name}</h2>
-                <p className="text-xs text-muted-foreground">{selectedContact.online ? "Çevrimiçi" : "Çevrimdışı"}</p>
+                <p className="text-xs text-muted-foreground">
+                  {typingUsers.get(String(selectedContact.id)) 
+                    ? "Yazıyor..." 
+                    : selectedContact.online 
+                      ? "Çevrimiçi" 
+                      : "Çevrimdışı"}
+                </p>
               </div>
             </div>
 
@@ -636,26 +706,39 @@ export default function ChatPage() {
                       className={cn(
                         "max-w-[70%] rounded-2xl px-4 py-2",
                         msg.sender === "me"
-                          ? "bg-gradient-to-r from-primary to-accent text-primary-foreground"
-                          : "bg-card border border-border text-foreground",
+                          ? "bg-[var(--message-sent)] text-white shadow-[0_2px_8px_var(--message-sent-shadow)] ml-auto"
+                          : "bg-[var(--message-received)] text-foreground shadow-[0_2px_8px_var(--message-received-shadow)]",
+                        msg.image && "p-2"
                       )}
                     >
                       {msg.image && (
                         <img
                           src={msg.image || "/placeholder.svg"}
                           alt="Uploaded"
-                          className="rounded-lg mb-2 max-w-full"
+                          className="rounded-lg mb-2 max-w-full shadow-md hover:scale-[0.98] transition-transform duration-200 cursor-zoom-in"
                         />
                       )}
-                      {msg.text && <p className="text-sm">{msg.text}</p>}
-                      <p
-                        className={cn(
-                          "text-xs mt-1",
-                          msg.sender === "me" ? "text-primary-foreground/70" : "text-muted-foreground",
+                      {msg.text && <p className="text-sm leading-relaxed">{msg.text}</p>}
+                      <div className="flex items-center justify-between mt-1 gap-2">
+                        <p
+                          className={cn(
+                            "text-[11px]",
+                            msg.sender === "me" ? "text-primary-foreground/80" : "text-muted-foreground/80",
+                          )}
+                        >
+                          {msg.time}
+                        </p>
+                        {msg.sender === "me" && msg.status && (
+                          <span className={cn(
+                            "text-xs ml-1",
+                            msg.status === 'read' ? "text-sky-400" : "text-primary-foreground/80"
+                          )}>
+                            {msg.status === 'sent' && "✓"}
+                            {msg.status === 'delivered' && "✓✓"}
+                            {msg.status === 'read' && "✓✓"}
+                          </span>
                         )}
-                      >
-                        {msg.time}
-                      </p>
+                      </div>
                     </div>
                   </div>
                 ))}
@@ -664,12 +747,12 @@ export default function ChatPage() {
             </ScrollArea>
 
             {/* Message Input */}
-            <div className="p-4 border-t border-border bg-card space-y-4">
+            <div className="p-4 border-t border-border bg-card/50 backdrop-blur-sm space-y-4">
               {previewUrl && (
-                <div className="relative w-48 h-48 mx-auto">
-                  <img src={previewUrl} alt="preview" className="w-full h-full rounded-lg object-cover shadow-lg" />
+                <div className="relative w-48 h-48 mx-auto group">
+                  <img src={previewUrl} alt="preview" className="w-full h-full rounded-lg object-cover shadow-lg transition-transform duration-200 group-hover:scale-[0.98]" />
                   <button
-                    className="absolute top-2 right-2 p-1.5 rounded-full bg-destructive text-destructive-foreground hover:bg-destructive/90"
+                    className="absolute top-2 right-2 p-1.5 rounded-full bg-background/80 backdrop-blur-sm text-destructive hover:bg-destructive hover:text-white transition-colors duration-200"
                     onClick={() => {
                       setSelectedFile(null)
                       setPreviewUrl(null)
@@ -679,7 +762,7 @@ export default function ChatPage() {
                   </button>
                 </div>
               )}
-              <div className="flex items-center gap-2">
+              <div className="flex items-center gap-2 bg-background rounded-lg p-1 shadow-sm">
                 <input
                   type="file"
                   ref={fileInputRef}
@@ -696,27 +779,47 @@ export default function ChatPage() {
                   onClick={(e) => {
                     e.preventDefault();
                     console.log('Resim seçme butonu tıklandı');
-                    // Önce input'u sıfırla
                     if (fileInputRef.current) {
                       fileInputRef.current.value = '';
                       fileInputRef.current.click();
                     }
                   }}
-                  className="text-muted-foreground hover:text-primary"
+                  className="text-muted-foreground hover:text-primary transition-colors duration-200"
                 >
                   <ImageIcon className="h-5 w-5" />
                 </Button>
                 <Input
                   value={message}
-                  onChange={(e) => setMessage(e.target.value)}
-                  onKeyPress={(e) => e.key === "Enter" && handleSendMessage()}
+                  onChange={(e) => {
+                    setMessage(e.target.value);
+                    if (selectedContact) {
+                      if (!isTyping) {
+                        setIsTyping(true);
+                        sendTypingStatus(String(selectedContact.id), true);
+                      }
+                      
+                      if (typingTimeoutRef.current) {
+                        clearTimeout(typingTimeoutRef.current);
+                      }
+                      
+                      typingTimeoutRef.current = setTimeout(() => {
+                        setIsTyping(false);
+                        sendTypingStatus(String(selectedContact.id), false);
+                      }, 2000);
+                    }
+                  }}
+                  onKeyPress={(e) => e.key === "Enter" && !e.shiftKey && handleSendMessage()}
                   placeholder="Mesajınızı yazın..."
-                  className="flex-1 h-11"
+                  className="flex-1 h-11 bg-transparent border-0 focus-visible:ring-0"
                 />
                 <Button
                   onClick={handleSendMessage}
                   size="icon"
-                  className="h-11 w-11 bg-gradient-to-r from-primary to-accent hover:opacity-90"
+                  className={cn(
+                    "h-11 w-11 bg-gradient-to-r from-primary to-accent text-white shadow-md",
+                    "hover:opacity-90 transition-all duration-200",
+                    "active:scale-95"
+                  )}
                 >
                   <Send className="h-5 w-5" />
                 </Button>
